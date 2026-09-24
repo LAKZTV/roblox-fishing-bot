@@ -1,7 +1,7 @@
 """
 Auto fishing (วนลูป):
   เหวี่ยงเบ็ด -> รอมินิเกม -> ไล่ตัวขาวให้อยู่ในโซนเขียว (กดค้าง=ขึ้น, ปล่อย=ลง)
-  -> มินิเกมจบ -> รอ 1 วิ -> เห็นปุ่ม T -> กด T ค้างจน T หาย (สูงสุด 8 วิ แล้วค่อยๆ ลดลงเอง) -> วนใหม่
+  -> มินิเกมจบ -> รอ 1 วิ -> เห็นปุ่ม T -> กด T ค้าง 6.5 วิ -> วนใหม่
   (เหวี่ยงแล้วมินิเกมไม่ขึ้นใน 30 วิ -> เก็บสายแล้วเหวี่ยงใหม่)
 
 ติดตั้ง:   pip install mss numpy scipy
@@ -50,7 +50,9 @@ RECAST_GAP = 1.0    # เว้นระหว่างคลิกเก็บ�
 COLLECT_WAIT = 6.0  # มินิเกมจบแล้วรอปุ่ม T ขึ้นนานสุดกี่วินาที (ไม่ขึ้น = ข้ามไปเหวี่ยงใหม่)
 COLLECT_KEY = 0x14  # scan code ปุ่ม T
 AFTER_MINIGAME = 1.0  # มินิเกมจบแล้วรอกี่วินาที ก่อนเริ่มหาปุ่ม T
-COLLECT_HOLD = 8.0  # เวลากด T ค้างสูงสุดตอนเริ่ม (บอทจะค่อยๆ ลดลงเองตามเวลาจริงที่ T หาย)
+COLLECT_HOLD = 6.5  # กด T ค้างกี่วินาที
+ADAPTIVE_HOLD = False  # True = ปล่อยทันทีที่ T หาย แล้วค่อยๆ ลดเวลากดลงเอง
+                       # (ปิดไว้: ตอนกด T ปุ่มเปลี่ยนหน้าตา บอทเลยเข้าใจผิดว่า T หายตั้งแต่ ~0.2 วิ)
 COLLECT_MAX = 12.0  # กด T ค้างนานสุดจริงๆ (กันค้างตลอด)
 HOLD_MIN = 1.0      # เวลากดสูงสุดจะไม่ลดต่ำกว่านี้
 HOLD_STEP = 0.5     # ลดเวลากดสูงสุดลงรอบละกี่วินาที
@@ -284,7 +286,7 @@ def collect(sct, game, S):
     แล้วค่อยๆ ลดเวลากดสูงสุดลงมาให้ใกล้เวลาจริง (ถ้าไม่พอก็เพิ่มกลับ)"""
     global _hold, _history
     if _hold is None:
-        _hold, _history = load_hold()
+        _hold, _history = load_hold() if ADAPTIVE_HOLD else (COLLECT_HOLD, [])
 
     center = {"left": game["left"] + int(game["width"] * 0.3),
               "top": game["top"] + int(game["height"] * 0.2),
@@ -311,9 +313,11 @@ def collect(sct, game, S):
                 gone_since = None
             elif gone_since is None:
                 gone_since = el
-            if gone_since is not None and el - gone_since >= T_GONE_CONFIRM:
+            if gone_at is None and gone_since is not None and el - gone_since >= T_GONE_CONFIRM:
                 gone_at = gone_since          # T หายจริง (ไม่เห็นต่อเนื่อง)
-                break
+                print(f"  (มองไม่เห็นปุ่ม T ตั้งแต่ {gone_at:.1f} วิ)")
+                if ADAPTIVE_HOLD:
+                    break                     # โหมดปรับเวลาเอง: ปล่อยทันที
             if int(el) > last_print:
                 last_print = int(el)
                 print(f"  กด T ... {last_print} วิ")
@@ -322,6 +326,10 @@ def collect(sct, game, S):
             time.sleep(0.05)
     finally:
         key(COLLECT_KEY, False)
+
+    if not ADAPTIVE_HOLD:
+        print(f"กด T ครบ {_hold:g} วิ เก็บของเสร็จ")
+        return
 
     old = _hold
     if gone_at is not None:
