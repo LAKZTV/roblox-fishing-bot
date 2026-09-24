@@ -1,7 +1,7 @@
 """
 Auto fishing (วนลูป):
   เหวี่ยงเบ็ด -> รอมินิเกม -> ไล่ตัวขาวให้อยู่ในโซนเขียว (กดค้าง=ขึ้น, ปล่อย=ลง)
-  -> มินิเกมจบ -> เห็นปุ่ม T -> กด T ค้าง 8 วิ (เก็บของ) -> วนใหม่
+  -> มินิเกมจบ -> รอ 1 วิ -> เห็นปุ่ม T -> กด T ค้างจน T หาย (สูงสุด 8 วิ แล้วค่อยๆ ลดลงเอง) -> วนใหม่
   (เหวี่ยงแล้วมินิเกมไม่ขึ้นใน 30 วิ -> เก็บสายแล้วเหวี่ยงใหม่)
 
 ติดตั้ง:   pip install mss numpy scipy
@@ -49,7 +49,14 @@ RECAST_CLICKS = 2   # ตอนเหวี่ยงใหม่คลิกก�
 RECAST_GAP = 1.0    # เว้นระหว่างคลิกเก็บสายกับคลิกเหวี่ยงใหม่ (วินาที)
 COLLECT_WAIT = 6.0  # มินิเกมจบแล้วรอปุ่ม T ขึ้นนานสุดกี่วินาที (ไม่ขึ้น = ข้ามไปเหวี่ยงใหม่)
 COLLECT_KEY = 0x14  # scan code ปุ่ม T
-COLLECT_HOLD = 8.0  # เห็นปุ่ม T แล้วกด T ค้างกี่วินาที
+AFTER_MINIGAME = 1.0  # มินิเกมจบแล้วรอกี่วินาที ก่อนเริ่มหาปุ่ม T
+COLLECT_HOLD = 8.0  # เวลากด T ค้างสูงสุดตอนเริ่ม (บอทจะค่อยๆ ลดลงเองตามเวลาจริงที่ T หาย)
+COLLECT_MAX = 12.0  # กด T ค้างนานสุดจริงๆ (กันค้างตลอด)
+HOLD_MIN = 1.0      # เวลากดสูงสุดจะไม่ลดต่ำกว่านี้
+HOLD_STEP = 0.5     # ลดเวลากดสูงสุดลงรอบละกี่วินาที
+HOLD_MARGIN = 0.5   # เผื่อเวลาจากครั้งที่ T หายช้าสุด (5 ครั้งล่าสุด)
+T_GONE_CONFIRM = 0.3  # ไม่เห็น T ต่อเนื่องกี่วินาที ถึงนับว่า T หายจริง
+HOLD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hold.json")
 AFTER_COLLECT = 1.0 # เก็บของแล้วรอกี่วินาทีก่อนเหวี่ยงใหม่
 
 
@@ -254,8 +261,31 @@ def cast(game, quiet=False):
     mouse(False)
 
 
+def load_hold():
+    """เวลากด T ที่เรียนรู้ไว้ (จำข้ามการเปิดบอท)"""
+    try:
+        with open(HOLD_FILE) as f:
+            d = json.load(f)
+        return float(d["hold"]), list(d.get("history", []))
+    except Exception:
+        return COLLECT_HOLD, []
+
+
+def save_hold(hold, history):
+    with open(HOLD_FILE, "w") as f:
+        json.dump({"hold": round(hold, 2), "history": history[-20:]}, f)
+
+
+_hold, _history = None, None
+
+
 def collect(sct, game, S):
-    """รอปุ่ม T ขึ้นกลางหน้าต่างเกม แล้วกด T ค้างจนกว่ามันจะหาย"""
+    """รอปุ่ม T ขึ้น -> กด T ค้าง พร้อมนับว่ากดกี่วิแล้ว T หาย
+    แล้วค่อยๆ ลดเวลากดสูงสุดลงมาให้ใกล้เวลาจริง (ถ้าไม่พอก็เพิ่มกลับ)"""
+    global _hold, _history
+    if _hold is None:
+        _hold, _history = load_hold()
+
     center = {"left": game["left"] + int(game["width"] * 0.3),
               "top": game["top"] + int(game["height"] * 0.2),
               "width": int(game["width"] * 0.4), "height": int(game["height"] * 0.6)}
@@ -268,15 +298,43 @@ def collect(sct, game, S):
             return
         time.sleep(0.1)
 
-    print(f"เห็นปุ่ม T -> กด T ค้าง {COLLECT_HOLD:g} วิ")
+    print(f"เห็นปุ่ม T -> กด T ค้าง (สูงสุด {_hold:.1f} วิ)")
     t0 = time.perf_counter()
+    gone_since = None   # เวลาที่เริ่มไม่เห็น T
+    gone_at = None      # กดไปกี่วิแล้ว T หาย
+    last_print = 0
     try:
-        while time.perf_counter() - t0 < COLLECT_HOLD:
+        while True:
+            el = time.perf_counter() - t0
             key(COLLECT_KEY, True)  # ส่งซ้ำเหมือนกดค้างจริง (auto-repeat)
-            time.sleep(0.1)
+            if seen():
+                gone_since = None
+            elif gone_since is None:
+                gone_since = el
+            if gone_since is not None and el - gone_since >= T_GONE_CONFIRM:
+                gone_at = gone_since          # T หายจริง (ไม่เห็นต่อเนื่อง)
+                break
+            if int(el) > last_print:
+                last_print = int(el)
+                print(f"  กด T ... {last_print} วิ")
+            if el >= _hold:     # ครบเวลากดสูงสุดแล้ว T ยังไม่หาย
+                break
+            time.sleep(0.05)
     finally:
         key(COLLECT_KEY, False)
-    print("เก็บของเสร็จ")
+
+    old = _hold
+    if gone_at is not None:
+        _history.append(round(gone_at, 2))
+        recent = _history[-5:]
+        target = max(recent) + HOLD_MARGIN          # เวลาที่ควรพอ (ยึดครั้งที่นานสุดล่าสุด)
+        _hold = max(target, _hold - HOLD_STEP, HOLD_MIN)   # ค่อยๆ ลดทีละ HOLD_STEP
+        print(f"T หายหลังกด {gone_at:.1f} วิ | เฉลี่ย {sum(recent) / len(recent):.1f} วิ"
+              f" ({len(_history)} ครั้ง) | เวลากดสูงสุด {old:.1f} -> {_hold:.1f} วิ")
+    else:
+        _hold = min(_hold + 1.0, COLLECT_MAX)
+        print(f"กดครบแล้ว T ยังไม่หาย | เพิ่มเวลากดสูงสุด {old:.1f} -> {_hold:.1f} วิ")
+    save_hold(_hold, _history)
 
 
 def recast(game):
@@ -409,7 +467,8 @@ def main():
                 last_y, vel = None, 0.0
                 if now - last_seen > LOST_TIMEOUT:
                     playing = False
-                    print("มินิเกมจบ รอปุ่ม T...")
+                    print(f"มินิเกมจบ รอ {AFTER_MINIGAME:g} วิ แล้วหาปุ่ม T...")
+                    time.sleep(AFTER_MINIGAME)
                     collect(sct, game, S)
                     next_cast = time.perf_counter() + AFTER_COLLECT
                 time.sleep(0.01)

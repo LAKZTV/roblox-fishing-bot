@@ -4,3 +4,4 @@ config.json
 *.mp4
 test_*.webp
 Screenshot*.png
+hold.json
