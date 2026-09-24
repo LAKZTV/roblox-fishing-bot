@@ -1,7 +1,8 @@
 """
 Auto fishing (วนลูป):
   เหวี่ยงเบ็ด -> รอมินิเกม -> ไล่ตัวขาวให้อยู่ในโซนเขียว (กดค้าง=ขึ้น, ปล่อย=ลง)
-  -> มินิเกมจบ -> รอ 1 วิ -> เห็นปุ่ม T -> กด T ค้าง 6.5 วิ -> วนใหม่
+  -> มินิเกมจบ -> รอ 1 วิ -> เห็นปุ่ม T -> กด T ค้าง 6.5 วิ
+  -> ถ้ายังเห็นปุ่ม T อยู่ กดใหม่ (สูงสุด COLLECT_RETRIES รอบ) -> วนใหม่
   (เหวี่ยงแล้วมินิเกมไม่ขึ้นใน 30 วิ -> เก็บสายแล้วเหวี่ยงใหม่)
 
 ติดตั้ง:   pip install mss numpy scipy
@@ -51,6 +52,8 @@ COLLECT_WAIT = 6.0  # มินิเกมจบแล้วรอปุ่ม 
 COLLECT_KEY = 0x14  # scan code ปุ่ม T
 AFTER_MINIGAME = 1.0  # มินิเกมจบแล้วรอกี่วินาที ก่อนเริ่มหาปุ่ม T
 COLLECT_HOLD = 6.5  # กด T ค้างกี่วินาที
+COLLECT_RETRIES = 3 # กด T ครบเวลาแล้ว T ยังอยู่ -> กดใหม่ได้อีกกี่รอบ
+RECHECK_DELAY = 0.5 # ปล่อย T แล้วรอกี่วินาที (ให้ปุ่มกลับหน้าตาปกติ) ก่อนเช็คว่า T ยังอยู่ไหม
 ADAPTIVE_HOLD = False  # True = ปล่อยทันทีที่ T หาย แล้วค่อยๆ ลดเวลากดลงเอง
                        # (ปิดไว้: ตอนกด T ปุ่มเปลี่ยนหน้าตา บอทเลยเข้าใจผิดว่า T หายตั้งแต่ ~0.2 วิ)
 COLLECT_MAX = 12.0  # กด T ค้างนานสุดจริงๆ (กันค้างตลอด)
@@ -131,7 +134,11 @@ def masks(img):
     white = (mn > 70) & (mx - mn < mx * 0.45) & (img.mean(-1) > 115) & (b <= g + 10)
     # โซน: โปร่งแสง สีเปลี่ยนตามพื้นหลัง และบางทีเป็นเขียว บางทีเป็นเหลือง
     # (เขียวมะกอก 75,85,43 / เขียวอมฟ้า 63,149,109 / เขียวเข้ม 45,77,18 / เหลือง)
-    green = (g >= r - 10) & (g - b >= 15) & (g >= 60) & ~white
+    green = (g >= r - 10) & (g - b >= 15) & (g >= 60)
+    # โซนสีเหลือง (ตอนตัวขาวหลุดโซน): ขอบ 238,213,3 / ข้างใน 94,78,22
+    # r > g เลยไม่ผ่านเงื่อนไขเขียว แต่ต่างจากพื้นไม้ (83,56,30) ตรงที่ g ใกล้ r และ b ต่ำมาก
+    yellow = (g >= r * 0.78) & (g - b >= 40) & (g - b >= g * 0.5) & (g >= 60)
+    green = (green | yellow) & ~white
     return white, green
 
 
@@ -281,26 +288,18 @@ def save_hold(hold, history):
 _hold, _history = None, None
 
 
-def collect(sct, game, S):
-    """รอปุ่ม T ขึ้น -> กด T ค้าง พร้อมนับว่ากดกี่วิแล้ว T หาย
-    แล้วค่อยๆ ลดเวลากดสูงสุดลงมาให้ใกล้เวลาจริง (ถ้าไม่พอก็เพิ่มกลับ)"""
-    global _hold, _history
-    if _hold is None:
-        _hold, _history = load_hold() if ADAPTIVE_HOLD else (COLLECT_HOLD, [])
+def still_T(seen, checks=3, gap=0.1):
+    """เช็คซ้ำหลายเฟรมว่ายังเห็นปุ่ม T อยู่จริงไหม (เห็นเกินครึ่ง = ยังอยู่)"""
+    n = 0
+    for k in range(checks):
+        n += seen()
+        if k < checks - 1:
+            time.sleep(gap)
+    return n * 2 > checks
 
-    center = {"left": game["left"] + int(game["width"] * 0.3),
-              "top": game["top"] + int(game["height"] * 0.2),
-              "width": int(game["width"] * 0.4), "height": int(game["height"] * 0.6)}
-    seen = lambda: find_T(to_rgb(sct.grab(center)), S)
 
-    t0 = time.perf_counter()
-    while not seen():
-        if time.perf_counter() - t0 > COLLECT_WAIT:
-            print("ไม่เห็นปุ่ม T ข้ามไป")
-            return
-        time.sleep(0.1)
-
-    print(f"เห็นปุ่ม T -> กด T ค้าง (สูงสุด {_hold:.1f} วิ)")
+def hold_T(seen):
+    """กด T ค้างจนครบ _hold วิ (หรือ T หายในโหมด ADAPTIVE_HOLD) คืนเวลาที่ T หาย หรือ None"""
     t0 = time.perf_counter()
     gone_since = None   # เวลาที่เริ่มไม่เห็น T
     gone_at = None      # กดไปกี่วิแล้ว T หาย
@@ -321,14 +320,47 @@ def collect(sct, game, S):
             if int(el) > last_print:
                 last_print = int(el)
                 print(f"  กด T ... {last_print} วิ")
-            if el >= _hold:     # ครบเวลากดสูงสุดแล้ว T ยังไม่หาย
+            if el >= _hold:     # ครบเวลากดสูงสุด
                 break
             time.sleep(0.05)
     finally:
         key(COLLECT_KEY, False)
+    return gone_at
 
+
+def collect(sct, game, S):
+    """รอปุ่ม T ขึ้น -> กด T ค้าง พร้อมนับว่ากดกี่วิแล้ว T หาย
+    แล้วค่อยๆ ลดเวลากดสูงสุดลงมาให้ใกล้เวลาจริง (ถ้าไม่พอก็เพิ่มกลับ)"""
+    global _hold, _history
+    if _hold is None:
+        _hold, _history = load_hold() if ADAPTIVE_HOLD else (COLLECT_HOLD, [])
+
+    center = {"left": game["left"] + int(game["width"] * 0.3),
+              "top": game["top"] + int(game["height"] * 0.2),
+              "width": int(game["width"] * 0.4), "height": int(game["height"] * 0.6)}
+    seen = lambda: find_T(to_rgb(sct.grab(center)), S)
+
+    t0 = time.perf_counter()
+    while not seen():
+        if time.perf_counter() - t0 > COLLECT_WAIT:
+            print("ไม่เห็นปุ่ม T ข้ามไป")
+            return
+        time.sleep(0.1)
+
+    for attempt in range(1, COLLECT_RETRIES + 2):
+        if attempt == 1:
+            print(f"เห็นปุ่ม T -> กด T ค้าง (สูงสุด {_hold:.1f} วิ)")
+        else:
+            print(f"กด T ครบแล้วยังเห็นปุ่ม T -> กดใหม่ (รอบ {attempt}/{COLLECT_RETRIES + 1})")
+        gone_at = hold_T(seen)
+        if ADAPTIVE_HOLD:
+            break
+        time.sleep(RECHECK_DELAY)
+        if not still_T(seen):
+            print(f"กด T ครบ {_hold:g} วิ เก็บของเสร็จ")
+            return
     if not ADAPTIVE_HOLD:
-        print(f"กด T ครบ {_hold:g} วิ เก็บของเสร็จ")
+        print(f"กด T {COLLECT_RETRIES + 1} รอบแล้วปุ่ม T ยังอยู่ ข้ามไป")
         return
 
     old = _hold
