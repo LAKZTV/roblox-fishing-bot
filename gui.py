@@ -1,17 +1,40 @@
 """แอปบอทตกปลา (แท็บ บอท + ทดสอบ) — ดับเบิลคลิก "เปิดบอทตกปลา.bat" หรือรัน: pythonw gui.py"""
-import json
 import os
-import queue
-import threading
-import time
-import tkinter as tk
-from tkinter import ttk
+import sys
+import traceback
 
-from PIL import Image, ImageTk
+ERROR_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "error.log")
 
-import checker
-import updater
-import fishing_bot as fb
+
+def fatal(text):
+    """เปิดไม่ได้ -> บันทึก error.log + ขึ้นกล่องข้อความ (pythonw ไม่มีหน้าต่าง cmd ให้เห็น error)"""
+    with open(ERROR_LOG, "w", encoding="utf-8") as f:
+        f.write(text)
+    hint = ""
+    if "No module named" in text:
+        hint = "ยังไม่ได้ติดตั้งไลบรารี — เปิดผ่าน \"เปิดบอทตกปลา.bat\" จะติดตั้งให้เอง\n" \
+               "หรือรัน: pip install -r requirements.txt\n\n"
+    import ctypes
+    ctypes.windll.user32.MessageBoxW(0, f"{hint}โปรแกรมเปิดไม่ได้:\n\n{text[-700:]}\n\nบันทึกไว้ที่ {ERROR_LOG}",
+                                     "บอทตกปลา", 0x10)
+    sys.exit(1)
+
+
+try:
+    import json
+    import queue
+    import threading
+    import time
+    import tkinter as tk
+    from tkinter import ttk
+
+    from PIL import Image, ImageTk
+
+    import checker
+    import updater
+    import fishing_bot as fb
+except Exception:
+    fatal(traceback.format_exc())
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
@@ -108,7 +131,8 @@ class App:
         button(upd, "เช็คอัปเดต", lambda: self.check_update(manual=True), size=8).pack(side="right", padx=6)
 
         self.started_at = None
-        self.worker = threading.Thread(target=fb.main, daemon=True)
+        self.crashed = False
+        self.worker = threading.Thread(target=self.run_bot, daemon=True)
         self.worker.start()
         self.tick()
         self.root.after(1500, self.check_update)
@@ -199,6 +223,21 @@ class App:
         self.preview_cap = tk.Label(t, text="", fg=MUTED, bg=BG, font=(FONT, 8))
         self.preview_cap.pack(**pad)
         button(t, "เปิดโฟลเดอร์ภาพ (check/)", self.open_dir).pack(fill="x", pady=(4, 8), **pad)
+
+    def run_bot(self):
+        """รันบอทในเธรด — ถ้าพัง ให้แสดง error ในแอป (ไม่ปิดเงียบ)"""
+        try:
+            fb.main()
+        except Exception:
+            text = traceback.format_exc()
+            self.crashed = True
+            with open(ERROR_LOG, "w", encoding="utf-8") as f:
+                f.write(text)
+            fb.ctrl.running = False
+            fb.ctrl.status = "บอทหยุดเพราะเกิด error"
+            self.log_line("❌ บอทเกิด error (บันทึกไว้ใน error.log):")
+            for line in text.strip().splitlines()[-4:]:
+                self.log_line("   " + line.strip())
 
     # ================= settings =================
     def load_settings(self):
@@ -472,13 +511,16 @@ class App:
 
         if self.closing:
             return
-        if not self.worker.is_alive():   # กด F7 -> ปิดหน้าต่างด้วย
+        if not self.worker.is_alive() and not self.crashed:   # กด F7 -> ปิดหน้าต่างด้วย
             self.on_close()
             return
         self.root.after(200, self.tick)
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    App(root)
-    root.mainloop()
+    try:
+        root = tk.Tk()
+        App(root)
+        root.mainloop()
+    except Exception:
+        fatal(traceback.format_exc())
