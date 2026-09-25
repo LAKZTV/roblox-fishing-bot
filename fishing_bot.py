@@ -20,6 +20,7 @@ Auto fishing (วนลูป):
 import ctypes
 import json
 import os
+import threading
 import time
 
 import mss
@@ -80,6 +81,8 @@ class Control:
         self.quit = False        # ขอปิดโปรแกรม
         self.calibrate = False   # ขอหาตำแหน่งแถบใหม่ (สแกนทั้งหน้าต่างเกม)
         self.reset_bar = False   # ขอลืมตำแหน่งแถบ
+        self.calibrate_mouse = False  # F8: หาแถบรอบๆ เมาส์
+        self.debug = False       # F10: เซฟ debug.png
         self.status = "หยุดอยู่"
         self.casts = 0           # เหวี่ยงเบ็ดกี่ครั้ง
         self.games = 0           # เล่นมินิเกมกี่รอบ
@@ -97,6 +100,35 @@ _diag = {}        # สิ่งที่จับได้ล่าสุด (�
 
 def set_status(text):
     ctrl.status = text
+
+
+def interrupted():
+    """มีคำสั่งเปิด/ปิด/ออกเข้ามา หรือบอทถูกปิดอยู่ -> ขั้นที่กำลังรอต้องหยุดทันที"""
+    return ctrl.toggle or ctrl.quit or not ctrl.running
+
+
+def wait(seconds):
+    """รอแบบหยุดกลางคันได้ คืน False ถ้าถูกสั่งหยุดระหว่างรอ"""
+    end = time.perf_counter() + seconds
+    while time.perf_counter() < end:
+        if interrupted():
+            return False
+        time.sleep(min(0.02, max(end - time.perf_counter(), 0)))
+    return True
+
+
+def hotkey_loop():
+    """ฟังปุ่มลัดแยกเธรด — กดได้ทุกเวลา แม้บอทกำลังกด T ค้างหรือเหวี่ยงเบ็ดอยู่"""
+    while not ctrl.quit:
+        if key_pressed(VK_F6):
+            ctrl.toggle = True
+        if key_pressed(VK_F7):
+            ctrl.quit = True
+        if key_pressed(VK_F8):
+            ctrl.calibrate_mouse = True
+        if key_pressed(VK_F10):
+            ctrl.debug = True
+        time.sleep(0.02)
 
 
 # ================= input =================
@@ -358,7 +390,7 @@ def hold_T(seen):
             if int(el) > last_print:
                 last_print = int(el)
                 log(f"  กด T ... {last_print} วิ")
-            if el >= _hold or not ctrl.running:     # ครบเวลากดสูงสุด / สั่งหยุด
+            if el >= _hold or interrupted():     # ครบเวลากดสูงสุด / สั่งหยุด
                 break
             time.sleep(0.05)
     finally:
@@ -383,7 +415,7 @@ def collect(sct, game, S):
 
     t0 = time.perf_counter()
     while not seen():
-        if not ctrl.running:
+        if interrupted():
             return
         if time.perf_counter() - t0 > COLLECT_WAIT:
             log("ไม่เห็นปุ่ม T ข้ามไป")
@@ -397,7 +429,7 @@ def collect(sct, game, S):
 
     set_status("กด T เก็บของ...")
     for attempt in range(1, COLLECT_RETRIES + 2):
-        if not ctrl.running:
+        if interrupted():
             return
         if attempt == 1:
             log(f"เห็นปุ่ม T -> กด T ค้าง (สูงสุด {_hold:.1f} วิ)")
@@ -406,7 +438,8 @@ def collect(sct, game, S):
         gone_at = hold_T(seen)
         if ADAPTIVE_HOLD:
             break
-        time.sleep(RECHECK_DELAY)
+        if not wait(RECHECK_DELAY):
+            return
         if not still_T(seen):
             log(f"กด T ครบ {_hold:g} วิ เก็บของเสร็จ")
             ctrl.catches += 1
@@ -436,12 +469,14 @@ def recast(game):
     ctrl.recasts += 1
     for _ in range(RECAST_CLICKS - 1):
         cast(game, quiet=True)
-        time.sleep(RECAST_GAP)
+        if not wait(RECAST_GAP):
+            return
     cast(game)
 
 
 # ================= main =================
 def main():
+    threading.Thread(target=hotkey_loop, daemon=True).start()
     cfg = None
     if os.path.exists(BAR_FILE):
         with open(BAR_FILE) as f:
@@ -469,7 +504,7 @@ def main():
 
             ctrl.game_found = game is not None
             ctrl.has_bar = cfg is not None
-            if key_pressed(VK_F7) or ctrl.quit:
+            if ctrl.quit:
                 break
             if ctrl.reset_bar:
                 ctrl.reset_bar = False
@@ -487,7 +522,7 @@ def main():
                     log("ตั้งตำแหน่งแถบแล้ว:", bar_region(cfg, game))
                 else:
                     log("หาแถบไม่เจอ (กดตอนแถบมินิเกมขึ้นอยู่)")
-            if key_pressed(VK_F6) or ctrl.toggle:
+            if ctrl.toggle:
                 ctrl.toggle = False
                 running = not running
                 ctrl.running = running
@@ -498,7 +533,8 @@ def main():
                     user32.SetForegroundWindow(hwnd)
                 log("บอท:", "ON" if running else "OFF",
                       "| หน้าต่างเกม:", game if game else "ไม่เจอ Roblox")
-            if key_pressed(VK_F8):
+            if ctrl.calibrate_mouse:
+                ctrl.calibrate_mouse = False
                 c = calibrate(sct, game, cursor()[0]) if game else None
                 if c:
                     cfg = c
@@ -506,7 +542,8 @@ def main():
                     log("ตั้งตำแหน่งแถบแล้ว:", bar_region(cfg, game))
                 else:
                     log("หาแถบไม่เจอรอบๆ เมาส์ (กดตอนแถบขึ้น และเมาส์ชี้ที่แถบ)")
-            if key_pressed(VK_F10):
+            if ctrl.debug:
+                ctrl.debug = False
                 if game:
                     shot = sct.grab(game)
                     mss.tools.to_png(shot.rgb, shot.size, output="debug.png")
@@ -592,9 +629,9 @@ def main():
                     log(f"มินิเกมจบ รอ {AFTER_MINIGAME:g} วิ แล้วหาปุ่ม T...")
                     if observer:
                         observer.game_end()
-                    time.sleep(AFTER_MINIGAME)
-                    collect(sct, game, S)
-                    if observer:
+                    if wait(AFTER_MINIGAME):
+                        collect(sct, game, S)
+                    if observer and not interrupted():
                         observer.round_done()
                     if ctrl.running:
                         set_status("กำลังทำงาน")

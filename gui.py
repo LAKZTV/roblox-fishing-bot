@@ -10,6 +10,7 @@ from tkinter import ttk
 from PIL import Image, ImageTk
 
 import checker
+import updater
 import fishing_bot as fb
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
@@ -26,6 +27,7 @@ BG, CARD, FG, MUTED = "#1e1f24", "#2a2c33", "#eceef2", "#9aa0ab"
 GREEN, YELLOW, RED, BLUE = "#3fb96b", "#e3b341", "#e0564f", "#4c8dff"
 LEVEL_COLOR = {"good": GREEN, "ok": YELLOW, "bad": RED, "none": MUTED}
 FONT = "Segoe UI"
+UPDATE_EVERY_MS = 30 * 60 * 1000   # เช็คอัปเดตซ้ำทุก 30 นาที
 
 
 def button(parent, text, cmd, bg=CARD, size=9, bold=False):
@@ -40,7 +42,10 @@ class App:
         self.logs = queue.Queue()
         self.log_line = lambda text: self.logs.put(time.strftime("%H:%M:%S ") + text)
         fb._log_fn = self.log_line
+        self.auto_update = tk.BooleanVar(master=root, value=True)
         self.load_settings()
+        self.closing = False
+        self.update_ready = 0
         self.rec = None          # checker.Recorder ของการทดสอบล่าสุด
         self.test_mode = None    # None / "auto" / "manual"
         self.watcher = None
@@ -69,6 +74,7 @@ class App:
         self.status.pack(side="left", padx=6, fill="x", expand=True)
         self.info = tk.Label(root, text="", fg=MUTED, bg=BG, font=(FONT, 9), anchor="w")
         self.info.pack(fill="x", padx=12)
+        self.update_bar = button(root, "", self.do_update, BLUE, 9, True)   # โชว์เมื่อมีอัปเดต
 
         nb = ttk.Notebook(root)
         nb.pack(fill="both", padx=8, pady=(8, 0))
@@ -84,18 +90,28 @@ class App:
                            font=("Consolas", 9), state="disabled", wrap="word")
         self.log.pack(fill="both", padx=12, pady=(8, 4))
         bottom = tk.Frame(root, bg=BG)
-        bottom.pack(fill="x", padx=12, pady=(0, 10))
+        bottom.pack(fill="x", padx=12, pady=(0, 2))
         self.topmost = tk.BooleanVar(value=True)
         tk.Checkbutton(bottom, text="อยู่บนสุดเสมอ", variable=self.topmost, command=self.set_topmost,
                        fg=MUTED, bg=BG, selectcolor=CARD, activebackground=BG,
                        activeforeground=FG, font=(FONT, 8)).pack(side="left")
         tk.Label(bottom, text="F6 เริ่ม/หยุด · F8 ตั้งแถบ · F7 ปิด", fg=MUTED, bg=BG,
                  font=(FONT, 8)).pack(side="right")
+        upd = tk.Frame(root, bg=BG)
+        upd.pack(fill="x", padx=12, pady=(0, 10))
+        self.version = tk.Label(upd, text="เวอร์ชัน " + updater.current_version(), fg=MUTED, bg=BG,
+                                font=(FONT, 8))
+        self.version.pack(side="left")
+        tk.Checkbutton(upd, text="อัปเดตอัตโนมัติ", variable=self.auto_update, command=self.save_settings,
+                       fg=MUTED, bg=BG, selectcolor=CARD, activebackground=BG,
+                       activeforeground=FG, font=(FONT, 8)).pack(side="right")
+        button(upd, "เช็คอัปเดต", lambda: self.check_update(manual=True), size=8).pack(side="right", padx=6)
 
         self.started_at = None
         self.worker = threading.Thread(target=fb.main, daemon=True)
         self.worker.start()
         self.tick()
+        self.root.after(1500, self.check_update)
 
     # ================= แท็บบอท =================
     def build_bot_tab(self, t):
@@ -189,7 +205,9 @@ class App:
         try:
             with open(SETTINGS_FILE, encoding="utf-8") as f:
                 for k, v in json.load(f).items():
-                    if hasattr(fb, k):
+                    if k == "AUTO_UPDATE":
+                        self.auto_update.set(bool(v))
+                    elif hasattr(fb, k):
                         setattr(fb, k, float(v))
         except Exception:
             pass
@@ -197,7 +215,9 @@ class App:
     def save_settings(self):
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump({n: getattr(fb, n) for n, *_ in SETTINGS}, f, indent=2)
+                data = {n: getattr(fb, n) for n, *_ in SETTINGS}
+                data["AUTO_UPDATE"] = self.auto_update.get()
+                json.dump(data, f, indent=2)
         except Exception:
             pass
 
@@ -298,7 +318,61 @@ class App:
             self.stop_test()
         fb.ctrl.quit = True
         self.save_settings()
+        self.closing = True
         self.root.after(200, self.root.destroy)
+
+    # ================= อัปเดต =================
+    def check_update(self, manual=False):
+        def work():
+            try:
+                n, msgs = updater.check()
+            except Exception as e:
+                if manual:
+                    self.log_line(f"เช็คอัปเดตไม่ได้: {e}")
+                return
+            self.root.after(0, lambda: self.on_update_checked(n, msgs, manual))
+        threading.Thread(target=work, daemon=True).start()
+        if not manual:
+            self.root.after(UPDATE_EVERY_MS, self.check_update)
+
+    def on_update_checked(self, n, msgs, manual):
+        if n == 0:
+            if manual:
+                self.log_line("เป็นเวอร์ชันล่าสุดแล้ว")
+            return
+        self.update_ready = n
+        self.log_line(f"มีอัปเดตใหม่ {n} รายการ: " + " / ".join(msgs[:3]))
+        idle = not fb.ctrl.running and self.test_mode is None
+        if self.auto_update.get() and idle:
+            self.do_update()
+        else:
+            self.update_bar.configure(text=f"⬇  มีอัปเดตใหม่ {n} รายการ — กดเพื่ออัปเดต")
+            self.update_bar.pack(fill="x", padx=12, pady=(6, 0), ipady=3, after=self.info)
+
+    def do_update(self):
+        if fb.ctrl.running or self.test_mode:
+            self.log_line("หยุดบอท/การทดสอบก่อน แล้วค่อยอัปเดต")
+            return
+        self.update_bar.configure(text="กำลังอัปเดต...", state="disabled")
+        self.log_line("กำลังอัปเดต...")
+
+        def work():
+            try:
+                msg = updater.apply()
+            except Exception as e:
+                self.root.after(0, lambda: (self.log_line(str(e)),
+                                            self.update_bar.configure(state="normal",
+                                                                      text="⬇  อัปเดตไม่สำเร็จ — กดลองใหม่")))
+                return
+            self.root.after(0, lambda: self.finish_update(msg))
+        threading.Thread(target=work, daemon=True).start()
+
+    def finish_update(self, msg):
+        self.log_line(msg + " — กำลังเปิดแอปใหม่...")
+        self.save_settings()
+        fb.ctrl.quit = True
+        self.closing = True
+        self.root.after(800, lambda: (updater.restart(), self.root.destroy()))
 
     # ================= refresh =================
     def set_row(self, key, acc, detail):
@@ -396,8 +470,10 @@ class App:
             self.overall.configure(text="ยังไม่ได้ทดสอบ\nกด \"ทดสอบอัตโนมัติ\" แล้วรอให้บอทเล่นครบรอบ",
                                    fg=MUTED)
 
-        if not self.worker.is_alive() and not c.quit:
-            self.root.destroy()   # กด F7 -> ปิดหน้าต่างด้วย
+        if self.closing:
+            return
+        if not self.worker.is_alive():   # กด F7 -> ปิดหน้าต่างด้วย
+            self.on_close()
             return
         self.root.after(200, self.tick)
 
