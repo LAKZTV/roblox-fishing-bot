@@ -6,3 +6,4 @@ test_*.webp
 Screenshot*.png
 hold.json
 settings.json
+check/
