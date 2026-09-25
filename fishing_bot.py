@@ -91,6 +91,8 @@ class Control:
 
 
 ctrl = Control()
+observer = None   # ตัววัดความแม่นยำ (checker.AutoObserver) — None = ไม่วัด
+_diag = {}        # สิ่งที่จับได้ล่าสุด (ไว้วาดกรอบในภาพตรวจสอบ)
 
 
 def set_status(text):
@@ -236,6 +238,7 @@ def detect(strip, S, prev_center=None):
         zrow = min(zg, key=lambda g: abs(g.mean() - prev_center))
     else:
         zrow = max(zg, key=len)
+    _diag["white"] = (int(wrow.min()), int(wrow.max()))
     return wrow.mean(), zrow.min(), zrow.max()
 
 
@@ -249,6 +252,7 @@ def find_T(img, S):
         fill = filled.mean()                              # วงกลม ~0.78
         holes = (filled & ~comp).sum() / filled.sum()     # รูตัว T ~0.09
         if 0.65 <= fill <= 0.88 and holes >= 0.03:
+            _diag["T"] = (sl[1].start, sl[0].start, w, h)
             return True
     return False
 
@@ -384,8 +388,12 @@ def collect(sct, game, S):
         if time.perf_counter() - t0 > COLLECT_WAIT:
             log("ไม่เห็นปุ่ม T ข้ามไป")
             ctrl.misses += 1
+            if observer:
+                observer.t_missed(sct, game)
             return
         time.sleep(0.1)
+    if observer:
+        observer.t_found(seen, sct, game, time.perf_counter() - t0)
 
     set_status("กด T เก็บของ...")
     for attempt in range(1, COLLECT_RETRIES + 2):
@@ -554,6 +562,8 @@ def main():
                 continue
 
             res = detect(to_rgb(sct.grab(bar_region(cfg, game))), S, last_z if playing else None)
+            if observer:
+                observer.frame(playing, res, sct, game, cfg)
 
             # ---- ยังไม่อยู่ในมินิเกม ----
             if not playing:
@@ -580,8 +590,12 @@ def main():
                 if now - last_seen > LOST_TIMEOUT:
                     playing = False
                     log(f"มินิเกมจบ รอ {AFTER_MINIGAME:g} วิ แล้วหาปุ่ม T...")
+                    if observer:
+                        observer.game_end()
                     time.sleep(AFTER_MINIGAME)
                     collect(sct, game, S)
+                    if observer:
+                        observer.round_done()
                     if ctrl.running:
                         set_status("กำลังทำงาน")
                     next_cast = time.perf_counter() + AFTER_COLLECT
