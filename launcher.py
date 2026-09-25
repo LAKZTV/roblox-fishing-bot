@@ -1,4 +1,6 @@
-"""ตัวเปิดแอป (เรียกจาก "เปิดบอทตกปลา.bat"): เช็ค tkinter + ไลบรารี (ติดตั้งให้ถ้าขาด) แล้วเปิด gui.py"""
+"""ตัวเปิดแอป (เรียกจาก "เปิดบอทตกปลา.bat" ด้วย Python ของ .venv)
+เช็ค tkinter + ไลบรารี (ติดตั้งลง .venv ให้ถ้าขาด) แล้วเปิด gui.py
+ไลบรารีทั้งหมดอยู่ใน .venv ของโฟลเดอร์นี้ ไม่แตะ Python หลักของเครื่อง"""
 import importlib.util
 import os
 import subprocess
@@ -14,6 +16,14 @@ def missing():
 
 def main():
     print(f"Python {sys.version.split()[0]}  ({sys.executable})")
+    if sys.prefix == sys.base_prefix:
+        print("\n[X] ต้องเปิดผ่าน \"เปิดบอทตกปลา.bat\" (จะสร้าง .venv แยกให้ ไม่ลงไลบรารีใส่ Python หลักของเครื่อง)")
+        return 1
+
+    if sys.version_info < (3, 11):
+        print(f"\n[X] Python {sys.version.split()[0]} เก่าเกินไป — ต้องใช้ 3.11 ขึ้นไป (ไลบรารีเวอร์ชันที่ล็อกไว้ไม่รองรับ)")
+        print("    ติดตั้ง Python ใหม่จาก python.org แล้วลบโฟลเดอร์ .venv ทิ้ง จากนั้นเปิดไฟล์ .bat ใหม่")
+        return 1
 
     if importlib.util.find_spec("tkinter") is None:
         print("\n[X] Python ในเครื่องนี้ไม่มี tkinter (ใช้สร้างหน้าต่าง)")

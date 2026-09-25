@@ -8,3 +8,4 @@ hold.json
 settings.json
 check/
 error.log
+.venv/
