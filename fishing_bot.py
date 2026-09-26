@@ -463,11 +463,27 @@ def collect(sct, game, S):
     save_hold(_hold, _history)
 
 
+_recast_streak = 0   # เหวี่ยงใหม่ติดกันกี่ครั้งแล้วโดยมินิเกมยังไม่ขึ้น
+
+
+def reset_recast():
+    global _recast_streak
+    _recast_streak = 0
+
+
 def recast(game):
-    """เหวี่ยงไปนานแล้วมินิเกมไม่ขึ้น: คลิกเก็บสายก่อน แล้วค่อยเหวี่ยงใหม่"""
-    log(f"รอเกิน {CAST_TIMEOUT} วิ มินิเกมไม่ขึ้น -> เก็บสายแล้วเหวี่ยงใหม่")
+    """เหวี่ยงไปนานแล้วมินิเกมไม่ขึ้น: คลิกเก็บสายก่อน แล้วค่อยเหวี่ยงใหม่
+    ถ้าเบ็ดไม่ได้อยู่ในน้ำจริง คลิก 2 ครั้งจะกลายเป็น เหวี่ยง+เก็บทันที แล้ววนผิดจังหวะตลอด
+    -> สลับ 2 คลิก / 1 คลิก ทุกรอบที่ยังไม่ขึ้น เพื่อให้จังหวะกลับมาตรงเอง"""
+    global _recast_streak
+    _recast_streak += 1
+    clicks = RECAST_CLICKS if _recast_streak % 2 == 1 else 1
+    if clicks == 1 and RECAST_CLICKS > 1:
+        log(f"รอเกิน {CAST_TIMEOUT} วิ มินิเกมยังไม่ขึ้น -> คลิกครั้งเดียว (แก้จังหวะ เผื่อเบ็ดไม่ได้อยู่ในน้ำ)")
+    else:
+        log(f"รอเกิน {CAST_TIMEOUT} วิ มินิเกมไม่ขึ้น -> เก็บสายแล้วเหวี่ยงใหม่")
     ctrl.recasts += 1
-    for _ in range(RECAST_CLICKS - 1):
+    for _ in range(clicks - 1):
         cast(game, quiet=True)
         if not wait(RECAST_GAP):
             return
@@ -611,6 +627,7 @@ def main():
                     last_y = last_z = None
                     log("มินิเกมขึ้น -> เล่นมินิเกม")
                     ctrl.games += 1
+                    reset_recast()
                     set_status("กำลังเล่นมินิเกม")
                 elif AUTO_CAST and now >= next_cast:
                     recast(game) if line_out else cast(game)
